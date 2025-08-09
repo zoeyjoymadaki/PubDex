@@ -1,36 +1,52 @@
-# PubDex Smart Contract
+# PubDex Smart Contract v2.0.0
 
-**PubDex** is a decentralized data indexing and verification platform built on Clarity. It enables trusted data providers to submit, verify, and manage data indexes, with dynamic rewards, reputation, staking, and governance mechanisms.
-
----
-
-## Features
-
-- **Data Indexing:** Providers submit data indexes with metadata and category tags.
-- **Verification System:** Indexes can be verified by a set of chosen verifiers.
-- **Dynamic Rewards:** Rewards are calculated based on provider tier, reputation, and category demand.
-- **Reputation System:** Providers earn or lose reputation based on submissions, verifications, and flags.
-- **Staking:** Providers can stake STX tokens and may be slashed for misbehavior.
-- **Flagging:** Indexes can be flagged, affecting provider reputation.
-- **Governance:** Admin can approve/revoke providers and set provider tiers.
-- **Extensible:** Placeholder for registering external data sources.
+**PubDex** is a decentralized data indexing and verification platform built on Clarity, now enhanced with advanced reputation tracking and economic security mechanisms.
 
 ---
 
-## Data Structures
+## New Features in v2.0.0
 
-- **Indexes:** Stores data hash, metadata, owner, verification status, count, timestamp, and category.
-- **Rewards:** Tracks reward balances for providers.
-- **Provider Reputation:** Tracks score, submissions, verified submissions, flags, and last update.
-- **Category Demand:** Used for dynamic reward calculation.
-- **Provider Tier:** Determines reward multipliers.
-- **Verification Requests:** Manages verification workflow.
-- **Stakes:** Tracks provider staking balances.
-- **Flags:** Tracks number of flags per index.
+### Enhanced Reputation System
+- **Time Decay**: 5% reputation decay per day (~144 blocks)
+- **Quality Scoring**: 30% weight in reputation calculation
+- **Category Expertise**: Tracks provider performance in specific categories
+- **Consistency Tracking**: Rewards consistent quality submissions
+- **Historical Data**: Maintains last 10 reputation entries per provider
+
+### Economic Security Framework
+- **Minimum Security**: 1M STX minimum total stake requirement
+- **Insurance Fund**: Collects slashed stakes
+- **Dynamic Requirements**: Stake requirements vary based on reputation and tier
+
+### Advanced Slashing Mechanism
+- **Evidence Types**:
+  - False Verification (50% penalty)
+  - Spam Submission (25% penalty)
+  - Collusion (100% penalty)
+  - Data Manipulation (75% penalty)
+- **Validator Voting**: Requires multiple validator confirmations
+- **Challenge Period**: 7-day window for evidence validation
+
+## Previous Features
+- Data Indexing with metadata and categories
+- Multi-verifier verification system
+- Dynamic rewards based on tiers
+- Provider staking and flagging
+- Administrative controls
 
 ---
 
 ## Core Functions
+
+### Reputation Management
+- `update-enhanced-reputation(provider, score-change, verified, category)`
+- `calculate-quality-score(provider, category, success)`
+- `calculate-time-decay(last-updated, current-score)`
+
+### Economic Security
+- `submit-slashing-evidence(accused, evidence-type, evidence-hash)`
+- `validate-slashing-evidence(evidence-id, approve)`
+- `execute-slashing(accused, evidence-type)`
 
 ### Governance
 
@@ -111,6 +127,11 @@
 
 - `get-flags(index-id)`  
   Get number of flags for an index.
+- `get-category-expertise(provider, category)`
+- `get-reputation-history(provider)`
+- `get-slashing-evidence(evidence-id)`
+- `get-economic-security-status()`
+- `get-required-stake(provider)`
 
 ---
 
@@ -153,3 +174,19 @@ The contract includes a placeholder for registering external data sources, allow
 ## License
 
 This contract is provided for educational and demonstration purposes. Please review and audit before deploying to mainnet.
+
+---
+
+## Data Structures
+
+### New in v2.0.0
+- **Enhanced Provider Reputation**:
+  ```clarity
+  (score uint)
+  (total-submissions uint)
+  (verified-submissions uint)
+  (flags-received uint)
+  (last-updated uint)
+  (quality-score uint)
+  (consistency-score uint)
+  ```
