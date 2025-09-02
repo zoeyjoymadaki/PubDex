@@ -1,7 +1,7 @@
 ;; PubDex - Decentralized Data Indexing and Verification Platform
 ;; Contract: PubDex Enhanced
 ;; Description: A platform for submitting, verifying, and rewarding quality data indexes
-;; Version: 2.0.0 - Enhanced with Advanced Reputation and Economic Security
+;; Version: 2.1.0 - Enhanced with Economic Incentive Alignment and Anti-Gaming Mechanisms
 
 ;; Core data structures
 (define-data-var next-index-id uint u1)
@@ -61,6 +61,36 @@
 (define-data-var total-staked uint u0)
 (define-data-var insurance-fund uint u0)
 
+;; NEW: Verifier Economic Stake System
+(define-map verifier-stakes principal uint)
+(define-map verifier-performance principal (tuple
+  (correct-verifications uint)
+  (total-verifications uint)
+  (stake-slashed uint)
+  (reputation-score uint)
+))
+
+(define-constant min-verifier-stake u5000) ;; Higher stake requirement for verifiers
+(define-constant verifier-slash-rate u20) ;; 20% slash for incorrect verifications
+
+;; NEW: Anti-collusion tracking
+(define-map provider-verifier-interactions (tuple (provider principal) (verifier principal)) (tuple
+  (interaction-count uint)
+  (success-rate uint)
+  (last-interaction uint)
+))
+
+(define-constant max-interaction-rate u30) ;; Max 30% of verifications from same verifier
+(define-constant collusion-threshold u80) ;; 80%+ success rate triggers investigation
+
+;; NEW: Sybil attack prevention
+(define-map identity-verification principal (tuple
+  (verification-method (buff 32))
+  (verification-hash (buff 32))
+  (verified-at uint)
+  (verification-score uint)
+))
+
 ;; Status constants as buffers
 (define-constant STATUS-PENDING (unwrap-panic (as-max-len? (unwrap-panic (to-consensus-buff? "pending")) u16)))
 (define-constant STATUS-VALIDATED (unwrap-panic (as-max-len? (unwrap-panic (to-consensus-buff? "validated")) u16)))
@@ -70,7 +100,7 @@
 (define-constant CATEGORY-PENALTY (unwrap-panic (as-max-len? (unwrap-panic (to-consensus-buff? "penalty")) u32)))
 (define-constant CATEGORY-ADMIN-PENALTY (unwrap-panic (as-max-len? (unwrap-panic (to-consensus-buff? "admin-penalty")) u32)))
 
-;; Evidence type constants as buffers - FIXED: Added evidence type constants
+;; Evidence type constants as buffers
 (define-constant EVIDENCE-FALSE-VERIFICATION (unwrap-panic (as-max-len? (unwrap-panic (to-consensus-buff? "false-verification")) u32)))
 (define-constant EVIDENCE-SPAM-SUBMISSION (unwrap-panic (as-max-len? (unwrap-panic (to-consensus-buff? "spam-submission")) u32)))
 (define-constant EVIDENCE-COLLUSION (unwrap-panic (as-max-len? (unwrap-panic (to-consensus-buff? "collusion")) u32)))
@@ -135,6 +165,8 @@
 (define-constant ERR-INSUFFICIENT-ECONOMIC-SECURITY (err u414))
 (define-constant ERR-EVIDENCE-EXPIRED (err u415))
 (define-constant ERR-ALREADY-VOTED (err u416))
+(define-constant ERR-POTENTIAL-COLLUSION (err u417))
+(define-constant ERR-INSUFFICIENT-VERIFIER-STAKE (err u418))
 
 ;; Helper functions for min/max operations
 (define-private (min-uint (a uint) (b uint))
@@ -177,6 +209,13 @@
 
 (define-private (is-evidence-validator (validator principal))
   (default-to false (map-get? evidence-validators validator))
+)
+
+;; NEW: Check if principal is a qualified verifier
+(define-private (is-qualified-verifier (verifier principal))
+  (let ((verifier-stake (default-to u0 (map-get? verifier-stakes verifier))))
+    (>= verifier-stake min-verifier-stake)
+  )
 )
 
 ;; Enhanced Reputation System Functions
@@ -278,6 +317,108 @@
       (if (is-eq tier u3)
         (/ base-requirement u2) ;; 0.5x stake for gold tier
         base-requirement))
+  )
+)
+
+;; NEW: Verifier Economic Stake Functions
+(define-public (stake-as-verifier (amount uint))
+  (begin
+    (asserts! (>= amount min-verifier-stake) ERR-INSUFFICIENT-STAKE)
+    (asserts! (is-valid-amount amount) ERR-INVALID-AMOUNT)
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (map-set verifier-stakes tx-sender (+ amount (default-to u0 (map-get? verifier-stakes tx-sender))))
+    
+    ;; Initialize verifier performance tracking
+    (map-set verifier-performance tx-sender {
+      correct-verifications: u0,
+      total-verifications: u0,
+      stake-slashed: u0,
+      reputation-score: u500
+    })
+    (print {event: "verifier-staked", verifier: tx-sender, amount: amount})
+    (ok true)
+  )
+)
+
+;; NEW: Slash verifier for incorrect verification
+(define-private (slash-verifier (verifier principal) (slash-amount uint))
+  (let ((current-stake (default-to u0 (map-get? verifier-stakes verifier)))
+        (performance (default-to {correct-verifications: u0, total-verifications: u0, stake-slashed: u0, reputation-score: u500}
+                                (map-get? verifier-performance verifier))))
+    (begin
+      (map-set verifier-stakes verifier (- current-stake slash-amount))
+      (map-set verifier-performance verifier 
+        (merge performance {
+          stake-slashed: (+ (get stake-slashed performance) slash-amount),
+          reputation-score: (max-uint (- (get reputation-score performance) u100) u0)
+        }))
+      (var-set insurance-fund (+ (var-get insurance-fund) slash-amount))
+      (print {event: "verifier-slashed", verifier: verifier, amount: slash-amount})
+    )
+  )
+)
+
+;; NEW: Check for potential collusion
+(define-private (check-collusion (provider principal) (verifier principal))
+  (let ((interaction-key {provider: provider, verifier: verifier})
+        (current-interactions (default-to {interaction-count: u0, success-rate: u0, last-interaction: u0}
+                                         (map-get? provider-verifier-interactions interaction-key))))
+    (and (> (get interaction-count current-interactions) u5)
+         (> (get success-rate current-interactions) collusion-threshold))
+  )
+)
+
+;; NEW: Update interaction tracking
+(define-private (update-interaction-tracking (provider principal) (verifier principal) (approve bool))
+  (let ((interaction-key {provider: provider, verifier: verifier})
+        (current-interactions (default-to {interaction-count: u0, success-rate: u0, last-interaction: u0}
+                                         (map-get? provider-verifier-interactions interaction-key)))
+        (new-count (+ (get interaction-count current-interactions) u1))
+        (current-successes (/ (* (get success-rate current-interactions) (get interaction-count current-interactions)) u100))
+        (new-successes (if approve (+ current-successes u1) current-successes))
+        (new-success-rate (if (> new-count u0) (/ (* new-successes u100) new-count) u0)))
+    (map-set provider-verifier-interactions interaction-key {
+      interaction-count: new-count,
+      success-rate: new-success-rate,
+      last-interaction: stacks-block-height
+    })
+  )
+)
+
+;; NEW: Identity verification for Sybil prevention
+(define-public (submit-identity-verification (verification-method (buff 32)) (verification-hash (buff 32)))
+  (begin
+    (asserts! (> (len verification-method) u0) ERR-INVALID-INPUT)
+    (asserts! (is-valid-hash verification-hash) ERR-INVALID-INPUT)
+    
+    (map-set identity-verification tx-sender {
+      verification-method: verification-method,
+      verification-hash: verification-hash,
+      verified-at: stacks-block-height,
+      verification-score: u0 ;; To be updated by admin after verification
+    })
+    (print {event: "identity-verification-submitted", provider: tx-sender})
+    (ok true)
+  )
+)
+
+;; NEW: Admin function to confirm identity verification
+(define-public (confirm-identity-verification (provider principal) (score uint))
+  (begin
+    (asserts! (is-admin tx-sender) ERR-UNAUTHORIZED)
+    (asserts! (is-valid-principal provider) ERR-INVALID-INPUT)
+    (asserts! (<= score u1000) ERR-INVALID-INPUT)
+    
+    (match (map-get? identity-verification provider)
+      some-verification
+        (begin
+          (map-set identity-verification provider 
+            (merge some-verification {verification-score: score}))
+          (print {event: "identity-verification-confirmed", provider: provider, score: score})
+          (ok true)
+        )
+      ERR-NOT-FOUND
+    )
   )
 )
 
@@ -525,40 +666,80 @@
   )
 )
 
+;; NEW: Enhanced verification with economic consequences and collusion detection
 (define-public (verify-index (verification-id uint) (approve bool))
   (begin
     (asserts! (> verification-id u0) ERR-INVALID-INPUT)
+    (asserts! (is-qualified-verifier tx-sender) ERR-INSUFFICIENT-VERIFIER-STAKE)
+    
     (match (map-get? verification-requests verification-id)
       some-request
         (begin
           (asserts! (< stacks-block-height (get deadline some-request)) ERR-VERIFICATION-EXPIRED)
           (asserts! (is-some (index-of (get verifiers some-request) tx-sender)) ERR-FORBIDDEN)
           
-          (map-set verifier-votes {verification-id: verification-id, verifier: tx-sender} approve)
-          
-          (if approve
-            (let ((new-confirmations (+ (get confirmations some-request) u1)))
-              (map-set verification-requests verification-id 
-                (merge some-request {confirmations: new-confirmations}))
-              
-              (if (>= new-confirmations (get required-confirmations some-request))
+          ;; Check for potential collusion
+          (match (map-get? indexes (get index-id some-request))
+            some-index
+              (let ((provider (get owner some-index)))
                 (begin
-                  (match (map-get? indexes (get index-id some-request))
-                    some-index
-                      (begin
-                        (map-set indexes (get index-id some-request) 
-                          (merge some-index {verified: true, verification-count: (+ (get verification-count some-index) u1)}))
-                        (update-enhanced-reputation (get owner some-index) 50 true (get category some-index))
-                        (print {event: "pubdex-index-verified", index-id: (get index-id some-request)})
+                  ;; Update interaction tracking
+                  (update-interaction-tracking provider tx-sender approve)
+                  
+                  ;; Check for collusion and warn if detected
+                  (begin
+  (if (check-collusion provider tx-sender)
+    (begin
+      (print {event: "potential-collusion-detected", provider: provider, verifier: tx-sender})
+      true
+    )
+    true
+  )
+)
+                  
+                  ;; Update verifier performance
+                  (let ((current-performance (default-to {correct-verifications: u0, total-verifications: u0, stake-slashed: u0, reputation-score: u500}
+                                                        (map-get? verifier-performance tx-sender))))
+                    (map-set verifier-performance tx-sender 
+                      (merge current-performance {
+                        total-verifications: (+ (get total-verifications current-performance) u1)
+                      }))
+                  )
+                  
+                  (map-set verifier-votes {verification-id: verification-id, verifier: tx-sender} approve)
+                  
+                  (if approve
+                    (let ((new-confirmations (+ (get confirmations some-request) u1)))
+                      (map-set verification-requests verification-id 
+                        (merge some-request {confirmations: new-confirmations}))
+                      
+                      (if (>= new-confirmations (get required-confirmations some-request))
+                        (begin
+                          (map-set indexes (get index-id some-request) 
+                            (merge some-index {verified: true, verification-count: (+ (get verification-count some-index) u1)}))
+                          (update-enhanced-reputation provider 50 true (get category some-index))
+                          
+                          ;; Update verifier performance for correct verification
+                          (let ((current-performance (default-to {correct-verifications: u0, total-verifications: u0, stake-slashed: u0, reputation-score: u500}
+                                                                (map-get? verifier-performance tx-sender))))
+                            (map-set verifier-performance tx-sender 
+                              (merge current-performance {
+                                correct-verifications: (+ (get correct-verifications current-performance) u1),
+                                reputation-score: (min-uint (+ (get reputation-score current-performance) u10) u1000)
+                              }))
+                          )
+                          
+                          (print {event: "pubdex-index-verified", index-id: (get index-id some-request)})
+                          (ok true)
+                        )
                         (ok true)
                       )
-                    ERR-NOT-FOUND
+                    )
+                    (ok true)
                   )
                 )
-                (ok true)
               )
-            )
-            (ok true)
+            ERR-NOT-FOUND
           )
         )
       ERR-NOT-FOUND
@@ -645,6 +826,38 @@
                       u0),
     insurance-fund: (var-get insurance-fund)
   })
+)
+
+;; NEW: Read-only functions for enhanced features
+(define-read-only (get-verifier-performance (verifier principal))
+  (begin
+    (asserts! (is-valid-principal verifier) ERR-INVALID-INPUT)
+    (ok (default-to {correct-verifications: u0, total-verifications: u0, stake-slashed: u0, reputation-score: u500}
+                   (map-get? verifier-performance verifier)))
+  )
+)
+
+(define-read-only (get-interaction-history (provider principal) (verifier principal))
+  (begin
+    (asserts! (is-valid-principal provider) ERR-INVALID-INPUT)
+    (asserts! (is-valid-principal verifier) ERR-INVALID-INPUT)
+    (ok (default-to {interaction-count: u0, success-rate: u0, last-interaction: u0}
+                   (map-get? provider-verifier-interactions {provider: provider, verifier: verifier})))
+  )
+)
+
+(define-read-only (get-identity-verification (provider principal))
+  (begin
+    (asserts! (is-valid-principal provider) ERR-INVALID-INPUT)
+    (ok (map-get? identity-verification provider))
+  )
+)
+
+(define-read-only (get-verifier-stake (verifier principal))
+  (begin
+    (asserts! (is-valid-principal verifier) ERR-INVALID-INPUT)
+    (ok (default-to u0 (map-get? verifier-stakes verifier)))
+  )
 )
 
 (define-public (withdraw-rewards)
